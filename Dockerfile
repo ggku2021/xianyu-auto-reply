@@ -20,51 +20,16 @@ ENV DOCKER_ENV=true
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 # 安装系统依赖（包括Playwright浏览器依赖）
+# 已修正 libgdk-pixbuf2.0-0 为 libgdk-pixbuf-xlib-2.0-0，并优化了多行 RUN 的格式。
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        # 基础工具
-        nodejs \
-        npm \
-        tzdata \
-        curl \
-        ca-certificates \
-        # 图像处理依赖
-        libjpeg-dev \
-        libpng-dev \
-        libfreetype6-dev \
-        fonts-dejavu-core \
-        fonts-liberation \
-        # Playwright浏览器依赖 (已将 libgdk-pixbuf2.0-0 修正为 libgdk-pixbuf-xlib-2.0-0)
-        libnss3 \
-        libnspr4 \
-        libatk-bridge2.0-0 \
-        libdrm2 \
-        libxkbcommon0 \
-        libxcomposite1 \
-        libxdamage1 \
-        libxrandr2 \
-        libgbm1 \
-        libxss1 \
-        libasound2 \
-        libatspi2.0-0 \
-        libgtk-3-0 \
-        libgdk-pixbuf-xlib-2.0-0 \
-        libxcursor1 \
-        libxi6 \
-        libxrender1 \
-        libxext6 \
-        libx11-6 \
-        libxft2 \
-        libxinerama1 \
-        libxtst6 \
-        libappindicator3-1 \
-        libx11-xcb1 \
-        libxfixes3 \
-        xdg-utils \
-        && apt-get clean \
-        && rm -rf /var/lib/apt/lists/* \
-        && rm -rf /tmp/* \
-        && rm -rf /var/tmp/*
+    nodejs npm tzdata curl ca-certificates \
+    libjpeg-dev libpng-dev libfreetype6-dev fonts-dejavu-core fonts-liberation \
+    libnss3 libnspr4 libatk-bridge2.0-0 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 libgbm1 libxss1 libasound2 libatspi2.0-0 libgtk-3-0 libgdk-pixbuf-xlib-2.0-0 libxcursor1 libxi6 libxrender1 libxext6 libx11-6 libxft2 libxinerama1 libxtst6 libappindicator3-1 libx11-xcb1 libxfixes3 xdg-utils \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* \
+    && rm -rf /tmp/* \
+    && rm -rf /var/tmp/*
 
 # 设置时区
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
@@ -96,26 +61,4 @@ RUN mkdir -p /app/logs /app/data /app/backups && \
 EXPOSE 8080
 
 # 健康检查
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8080/health || exit 1
-
-# 创建启动脚本
-COPY <<EOG /app/entrypoint.sh
-#!/bin/bash
-set -e
-
-echo "🚀 启动闲鱼自动回复系统..."
-echo "📊 数据库将在应用启动时自动初始化..."
-echo "🎯 启动主应用..."
-
-# 确保数据目录存在
-mkdir -p /app/data /app/logs /app/backups
-
-# 启动主应用
-exec python Start.py
-EOG
-
-RUN chmod +x /app/entrypoint.sh
-
-# 启动命令
-CMD ["/app/entrypoint.sh"]
+HEALTHCHECK --interval=30s --
