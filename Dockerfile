@@ -34,7 +34,7 @@ RUN apt-get update && \
         libfreetype6-dev \
         fonts-dejavu-core \
         fonts-liberation \
-        # Playwright浏览器依赖
+        # Playwright浏览器依赖 (已将 libgdk-pixbuf2.0-0 修正为 libgdk-pixbuf-xlib-2.0-0)
         libnss3 \
         libnspr4 \
         libatk-bridge2.0-0 \
@@ -100,7 +100,7 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8080/health || exit 1
 
 # 创建启动脚本
-COPY <<EOF /app/entrypoint.sh
+COPY <<EOG /app/entrypoint.sh
 #!/bin/bash
 set -e
 
@@ -113,7 +113,7 @@ mkdir -p /app/data /app/logs /app/backups
 
 # 启动主应用
 exec python Start.py
-EOF
+EOG
 
 RUN chmod +x /app/entrypoint.sh
 
