@@ -13,8 +13,11 @@ import math
 import threading
 import tempfile
 import shutil
+import re
+import platform
+import subprocess
 from datetime import datetime
-from playwright.sync_api import sync_playwright, ElementHandle
+from playwright.sync_api import sync_playwright, ElementHandle, TimeoutError as PlaywrightTimeoutError
 from typing import Optional, Tuple, List, Dict, Any
 from loguru import logger
 from collections import defaultdict
@@ -28,8 +31,6 @@ except ImportError:
     # 如果无法导入配置，使用默认值
     SLIDER_MAX_CONCURRENT = 3
     SLIDER_WAIT_TIMEOUT = 60
-
-# 使用loguru日志库，与主程序保持一致
 
 # 全局并发控制
 class SliderConcurrencyManager:
@@ -191,13 +192,7 @@ class RetryStrategyStats:
             logger.error(f"保存策略统计数据失败: {e}")
     
     def record_attempt(self, attempt: int, strategy_type: str, success: bool):
-        """记录一次尝试结果
-        
-        Args:
-            attempt: 尝试次数 (1, 2, 3)
-            strategy_type: 策略类型 ('default', 'cautious', 'fast', 'slow')
-            success: 是否成功
-        """
+        """记录一次尝试结果"""
         with self.stats_lock:
             key = f'attempt_{attempt}_{strategy_type}'
             if key not in self.strategy_stats:
@@ -276,7 +271,6 @@ class XianyuSliderStealth:
         logger.info(f"【{self.pure_user_id}】实例已注册，当前并发: {stats['active_count']}/{stats['max_concurrent']}")
         
         # 轨迹学习相关属性
-        
         self.success_history_file = f"trajectory_history/{self.pure_user_id}_success.json"
         self.trajectory_params = {
             "total_steps_range": [5, 8],  # 极速：5-8步（超快滑动）
@@ -297,11 +291,7 @@ class XianyuSliderStealth:
         self.last_trajectory_params = {}
     
     def _check_date_validity(self) -> bool:
-        """检查日期有效性
-        
-        Returns:
-            bool: 如果当前日期小于 2025-11-30 返回 True，否则返回 False
-        """
+        """检查日期有效性"""
         try:
             # 设置截止日期
             expiry_date = datetime(2025, 12, 30)
@@ -335,6 +325,10 @@ class XianyuSliderStealth:
             
             # 启动浏览器，使用随机特征
             logger.info(f"【{self.pure_user_id}】启动浏览器，headless模式: {self.headless}")
+            
+            # 清理可能残留的Chrome进程
+            self._cleanup_chrome_processes()
+            
             self.browser = self.playwright.chromium.launch(
                 headless=self.headless,
                 args=[
@@ -401,27 +395,26 @@ class XianyuSliderStealth:
             # 创建上下文，使用随机特征
             logger.info(f"【{self.pure_user_id}】创建浏览器上下文...")
             
-            # 🔑 关键优化：添加更多真实浏览器特征
+            # 关键优化：添加更多真实浏览器特征
             context_options = {
                 'user_agent': browser_features['user_agent'],
                 'locale': browser_features['locale'],
                 'timezone_id': browser_features['timezone_id'],
-                # 🔑 添加真实的权限设置
+                # 添加真实的权限设置
                 'permissions': ['geolocation', 'notifications'],
-                # 🔑 添加真实的色彩方案
+                # 添加真实的色彩方案
                 'color_scheme': random.choice(['light', 'dark', 'no-preference']),
-                # 🔑 添加HTTP凭据
+                # 添加HTTP凭据
                 'http_credentials': None,
-                # 🔑 忽略HTTPS错误（某些情况下更真实）
+                # 忽略HTTPS错误（某些情况下更真实）
                 'ignore_https_errors': False,
             }
             
             # 根据模式配置viewport和no_viewport
             if not self.headless:
                 # 有头模式：使用 no_viewport=True 支持窗口最大化
-                # 注意：使用no_viewport时，不能设置device_scale_factor、is_mobile、has_touch
                 context_options['no_viewport'] = True  # 移除viewport限制，支持--start-maximized
-                self.context = self.browser.new_context(**context_options)
+                self.context = self.browser.new_context(** context_options)
             else:
                 # 无头模式：使用固定viewport
                 context_options.update({
@@ -459,6 +452,21 @@ class XianyuSliderStealth:
             # 确保在异常时也清理已创建的资源
             self._cleanup_on_init_failure()
             raise
+    
+    def _cleanup_chrome_processes(self):
+        """清理残留的Chrome进程"""
+        try:
+            if platform.system() == 'Windows':
+                subprocess.run(['taskkill', '/F', '/IM', 'chrome.exe'], capture_output=True, timeout=5)
+                logger.info(f"【{self.pure_user_id}】已清理Windows系统中的Chrome进程")
+            elif platform.system() == 'Linux':
+                subprocess.run(['pkill', 'chrome'], capture_output=True, timeout=5)
+                logger.info(f"【{self.pure_user_id}】已清理Linux系统中的Chrome进程")
+            elif platform.system() == 'Darwin':  # macOS
+                subprocess.run(['pkill', 'Google Chrome'], capture_output=True, timeout=5)
+                logger.info(f"【{self.pure_user_id}】已清理macOS系统中的Chrome进程")
+        except Exception as e:
+            logger.debug(f"【{self.pure_user_id}】清理Chrome进程时出错: {e}")
     
     def _cleanup_on_init_failure(self):
         """初始化失败时的清理"""
@@ -513,7 +521,7 @@ class XianyuSliderStealth:
             # 加载现有历史
             history = self._load_success_history()
             
-            # 添加新记录 - 只保存必要参数，不保存完整轨迹点（节省内存和磁盘空间）
+            # 添加新记录 - 只保存必要参数
             record = {
                 "timestamp": time.time(),
                 "user_id": self.pure_user_id,
@@ -526,8 +534,6 @@ class XianyuSliderStealth:
                 "acceleration_phase": trajectory_data.get("acceleration_phase", 0),
                 "fast_phase": trajectory_data.get("fast_phase", 0),
                 "slow_start_ratio": trajectory_data.get("slow_start_ratio", 0),
-                # 【优化】不再保存完整轨迹点，节省 90% 存储空间
-                # "trajectory_points": trajectory_data.get("trajectory_points", []),
                 "trajectory_point_count": len(trajectory_data.get("trajectory_points", [])),  # 只记录数量
                 "final_left_px": trajectory_data.get("final_left_px", 0),
                 "completion_used": trajectory_data.get("completion_used", False),
@@ -597,10 +603,10 @@ class XianyuSliderStealth:
                 if len(values) < 2:
                     return 0
                 avg = safe_avg(values)
-                variance = sum((x - avg) ** 2 for x in values) / len(values)
-                return variance ** 0.5
+                variance = sum((x - avg) **2 for x in values) / len(values)
+                return variance** 0.5
             
-            # 优化参数 - 真实人类模式（优先真实度而非速度）
+            # 优化参数 - 真实人类模式
             # 计算步数范围（确保最小值 < 最大值）
             steps_min = max(110, int(safe_avg(total_steps_list) - safe_std(total_steps_list) * 0.8))
             steps_max = min(130, int(safe_avg(total_steps_list) + safe_std(total_steps_list) * 0.8))
@@ -1131,12 +1137,12 @@ class XianyuSliderStealth:
                 }};
             }}
             
-            // 🔑 关键优化：隐藏CDP运行时特征
+            // 关键优化：隐藏CDP运行时特征
             Object.defineProperty(navigator, 'webdriver', {{
                 get: () => undefined
             }});
             
-            // 🔑 隐藏自动化控制特征
+            // 隐藏自动化控制特征
             window.navigator.chrome = {{
                 runtime: {{}},
                 loadTimes: function() {{}},
@@ -1144,12 +1150,12 @@ class XianyuSliderStealth:
                 app: {{}}
             }};
             
-            // 🔑 隐藏Playwright特征
+            // 隐藏Playwright特征
             delete window.__playwright;
             delete window.__pw_manual;
             delete window.__PW_inspect;
             
-            // 🔑 伪装chrome对象（防止检测headless）
+            // 伪装chrome对象（防止检测headless）
             if (!window.chrome) {{
                 window.chrome = {{}};
             }}
@@ -1159,7 +1165,7 @@ class XianyuSliderStealth:
                 connect: function() {{}}
             }};
             
-            // 🔑 伪装Permissions API
+            // 伪装Permissions API
             const originalQuery = window.navigator.permissions.query;
             window.navigator.permissions.query = (parameters) => (
                 parameters.name === 'notifications' ?
@@ -1167,7 +1173,7 @@ class XianyuSliderStealth:
                     originalQuery(parameters)
             );
             
-            // 🔑 覆盖Function.prototype.toString以隐藏代理
+            // 覆盖Function.prototype.toString以隐藏代理
             const oldToString = Function.prototype.toString;
             Function.prototype.toString = function() {{
                 if (this === navigator.permissions.query) {{
@@ -1195,14 +1201,7 @@ class XianyuSliderStealth:
             return t
     
     def _generate_physics_trajectory(self, distance: float):
-        """基于物理加速度模型生成轨迹 - 极速模式
-        
-        优化策略：
-        1. 极少轨迹点（5-8步）：快速完成
-        2. 持续加速：一气呵成，不减速
-        3. 确保超调50%以上：保证滑动到位
-        4. 无回退：单向滑动
-        """
+        """基于物理加速度模型生成轨迹 - 极速模式"""
         trajectory = []
         # 确保超调100%
         target_distance = distance * random.uniform(2.0, 2.1)  # 超调100-110%
@@ -1283,8 +1282,6 @@ class XianyuSliderStealth:
             final_left_px = 0  # 记录最终的left值
             
             # 移除所有微调和犹豫，保持丝滑流畅的滑动
-            # 真实手动滑动是一气呵成的，不会中途回退或停顿
-            
             for i, (x, y, delay) in enumerate(trajectory):
                 # 计算当前位置
                 current_x = start_x + x
@@ -1302,7 +1299,6 @@ class XianyuSliderStealth:
                     try:
                         current_style = slider_button.get_attribute("style")
                         if current_style and "left:" in current_style:
-                            import re
                             left_match = re.search(r'left:\s*([^;]+)', current_style)
                             if left_match:
                                 left_value = left_match.group(1).strip()
@@ -1356,8 +1352,11 @@ class XianyuSliderStealth:
                         logger.info(f"【{self.pure_user_id}】找到滑块容器: {selector}")
                         slider_container = element
                         break
+                except PlaywrightTimeoutError:
+                    logger.debug(f"【{self.pure_user_id}】选择器 {selector} 未找到")
+                    continue
                 except Exception as e:
-                    logger.debug(f"【{self.pure_user_id}】选择器 {selector} 未找到: {e}")
+                    logger.debug(f"【{self.pure_user_id}】选择器 {selector} 查找出错: {e}")
                     continue
             
             if not slider_container:
@@ -1383,8 +1382,11 @@ class XianyuSliderStealth:
                         logger.info(f"【{self.pure_user_id}】找到滑块按钮: {selector}")
                         slider_button = element
                         break
+                except PlaywrightTimeoutError:
+                    logger.debug(f"【{self.pure_user_id}】选择器 {selector} 未找到")
+                    continue
                 except Exception as e:
-                    logger.debug(f"【{self.pure_user_id}】选择器 {selector} 未找到: {e}")
+                    logger.debug(f"【{self.pure_user_id}】选择器 {selector} 查找出错: {e}")
                     continue
             
             if not slider_button:
@@ -1409,8 +1411,11 @@ class XianyuSliderStealth:
                         logger.info(f"【{self.pure_user_id}】找到滑块轨道: {selector}")
                         slider_track = element
                         break
+                except PlaywrightTimeoutError:
+                    logger.debug(f"【{self.pure_user_id}】选择器 {selector} 未找到")
+                    continue
                 except Exception as e:
-                    logger.debug(f"【{self.pure_user_id}】选择器 {selector} 未找到: {e}")
+                    logger.debug(f"【{self.pure_user_id}】选择器 {selector} 查找出错: {e}")
                     continue
             
             if not slider_track:
@@ -1438,7 +1443,7 @@ class XianyuSliderStealth:
                 logger.error(f"【{self.pure_user_id}】无法获取滑块轨道位置")
                 return 0
             
-            # 🔑 关键优化1：使用JavaScript获取更精确的尺寸（避免DPI缩放影响）
+            # 关键优化1：使用JavaScript获取更精确的尺寸（避免DPI缩放影响）
             try:
                 precise_distance = self.page.evaluate("""
                     () => {
@@ -1456,8 +1461,7 @@ class XianyuSliderStealth:
                 
                 if precise_distance and precise_distance > 0:
                     logger.info(f"【{self.pure_user_id}】使用JavaScript精确计算滑动距离: {precise_distance:.2f}px")
-                    # 🔑 关键优化2：添加微小随机偏移（防止每次都完全相同）
-                    # 真人操作时，滑动距离会有微小偏差
+                    # 关键优化2：添加微小随机偏移（防止每次都完全相同）
                     random_offset = random.uniform(-0.5, 0.5)
                     return precise_distance + random_offset
             except Exception as e:
@@ -1506,7 +1510,6 @@ class XianyuSliderStealth:
             try:
                 current_style = slider_button.get_attribute("style")
                 if current_style and "left:" in current_style:
-                    import re
                     left_match = re.search(r'left:\s*([^;]+)', current_style)
                     if left_match:
                         left_value = left_match.group(1).strip()
@@ -1756,7 +1759,7 @@ class XianyuSliderStealth:
                 if self.check_verification_success_fast(slider_button):
                     logger.info(f"【{self.pure_user_id}】✅ 滑块验证成功! (第{attempt}次尝试)")
                     
-                    # 📊 记录策略成功
+                    # 记录策略成功
                     strategy_stats.record_attempt(attempt, current_strategy, success=True)
                     logger.info(f"【{self.pure_user_id}】📊 记录策略: 第{attempt}次-{current_strategy}策略-成功")
                     
@@ -1776,7 +1779,7 @@ class XianyuSliderStealth:
                 else:
                     logger.warning(f"【{self.pure_user_id}】❌ 第{attempt}次验证失败")
                     
-                    # 📊 记录策略失败
+                    # 记录策略失败
                     strategy_stats.record_attempt(attempt, current_strategy, success=False)
                     logger.info(f"【{self.pure_user_id}】📊 记录策略: 第{attempt}次-{current_strategy}策略-失败")
                     
@@ -1831,7 +1834,7 @@ class XianyuSliderStealth:
         except Exception as e:
             logger.warning(f"【{self.pure_user_id}】关闭上下文时出错: {e}")
         
-        # 【修复】同步关闭浏览器，确保资源真正释放
+        # 同步关闭浏览器，确保资源真正释放
         try:
             if hasattr(self, 'browser') and self.browser:
                 self.browser.close()  # 直接同步关闭，不使用异步任务
@@ -1840,7 +1843,7 @@ class XianyuSliderStealth:
         except Exception as e:
             logger.warning(f"【{self.pure_user_id}】关闭浏览器时出错: {e}")
         
-        # 【修复】同步停止Playwright，确保资源真正释放
+        # 同步停止Playwright，确保资源真正释放
         try:
             if hasattr(self, 'playwright') and self.playwright:
                 self.playwright.stop()  # 直接同步停止，不使用异步任务
@@ -1880,18 +1883,7 @@ class XianyuSliderStealth:
             logger.debug(f"【{self.pure_user_id}】析构函数清理时出错: {e}")
     
     def login_with_password_headful(self, account: str = None, password: str = None, show_browser: bool = False):
-        """通过浏览器进行密码登录并获取Cookie (使用DrissionPage)
-        
-        Args:
-            account: 登录账号（必填）
-            password: 登录密码（必填）
-            show_browser: 是否显示浏览器窗口（默认False为无头模式）
-                         True: 有头模式，登录后等待5分钟（可手动处理验证码）
-                         False: 无头模式，登录后等待10秒
-            
-        Returns:
-            dict: 获取到的cookie字典，失败返回None
-        """
+        """通过浏览器进行密码登录并获取Cookie (使用DrissionPage)"""
         page = None
         try:
             # 检查日期有效性
@@ -1985,15 +1977,7 @@ class XianyuSliderStealth:
                         raise
                     
                     # 尝试清理可能残留的Chrome进程
-                    try:
-                        import subprocess
-                        import platform
-                        if platform.system() == 'Windows':
-                            subprocess.run(['taskkill', '/F', '/IM', 'chrome.exe'], 
-                                         capture_output=True, timeout=5)
-                            logger.info(f"【{self.pure_user_id}】已尝试清理残留Chrome进程")
-                    except Exception as cleanup_error:
-                        logger.debug(f"【{self.pure_user_id}】清理进程时出错: {cleanup_error}")
+                    self._cleanup_chrome_processes()
             
             if page is None:
                 logger.error(f"【{self.pure_user_id}】无法启动浏览器")
@@ -2014,8 +1998,6 @@ class XianyuSliderStealth:
             logger.info(f"【{self.pure_user_id}】当前URL: {current_url}")
             page_title = page.title
             logger.info(f"【{self.pure_user_id}】页面标题: {page_title}")
-            
-            
             logger.info(f"【{self.pure_user_id}】====================================")
             
             # 查找并点击密码登录标签
